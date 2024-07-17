@@ -17,13 +17,16 @@ class ActorNetwork(nn.Module):
         out = self.fc3(out)
         out = self.output_act(out, dim=-1)  # Add dim argument to log_softmax
 
-        # Ensure the output matches the number of actions
+        # Scale output to match vehicle control range
         throttle = torch.sigmoid(out[:, 0])  # Range [0, 1]
         steer = torch.tanh(out[:, 1])        # Range [-1, 1]
         brake = torch.sigmoid(out[:, 2])     # Range [0, 1]
-        reverse = torch.sigmoid(out[:, 3]) > 0.5  # Boolean
+        # Assuming other controls are not used or are boolean flags
+        return torch.stack([throttle, steer, brake], dim=1)
 
-        return torch.stack([throttle, steer, brake, reverse], dim=1)
+class CNNModel(nn.Module):
+    def __init__(self):
+        pass
 
 
 class CriticNetwork(nn.Module):

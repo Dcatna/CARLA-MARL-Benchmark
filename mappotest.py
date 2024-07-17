@@ -96,6 +96,7 @@ import random
 import re
 import weakref
 from MAPPO import MAPPO
+from time import sleep
 
 try:
     import pygame
@@ -199,6 +200,8 @@ class World(object):
         self.world = carla_world
         self.sync = args.sync
         self.actor_role_name = args.rolename
+        self._control = carla.VehicleControl()
+
         try:
             self.map = self.world.get_map()
         except RuntimeError as error:
@@ -248,10 +251,7 @@ class World(object):
         cam_index = self.camera_manager.index if self.camera_manager is not None else 0
         cam_pos_index = self.camera_manager.transform_index if self.camera_manager is not None else 0
         # Get a random blueprint.
-        blueprint_list = get_actor_blueprints(self.world, self._actor_filter, self._actor_generation)
-        if not blueprint_list:
-            raise ValueError("Couldn't find any blueprints with the specified filters")
-        blueprint = random.choice(blueprint_list)
+        blueprint = self.world.get_blueprint_library().filter('vehicle.tesla.model3')[0]
         blueprint.set_attribute('role_name', self.actor_role_name)
         if blueprint.has_attribute('terramechanics'):
             blueprint.set_attribute('terramechanics', 'true')
@@ -379,28 +379,68 @@ class World(object):
 
         # Flatten the state into a numerical array with 19 features
         state = [
-            transform.location.x,
-            transform.location.y,
-            transform.location.z,
-            transform.rotation.pitch,
-            transform.rotation.yaw,
-            transform.rotation.roll,
-            velocity.x,
-            velocity.y,
-            velocity.z,
-            acceleration.x,
-            acceleration.y,
-            acceleration.z,
-            control.throttle,
-            control.steer,
-            control.brake,
-            control.hand_brake,
-            control.reverse,
-            control.manual_gear_shift,
-            control.gear
+            transform.location.x, transform.location.y, transform.location.z,
+            transform.rotation.pitch, transform.rotation.yaw, transform.rotation.roll,
+            velocity.x, velocity.y, velocity.z,
+            acceleration.x, acceleration.y, acceleration.z,
+            control.throttle, control.steer, control.brake,
+            control.hand_brake, control.reverse, control.manual_gear_shift, control.gear
         ]
-
         return state
+
+    
+
+    def step(self, action):
+        # Apply the action to the vehicle
+        self._control.throttle = float(action[0])
+        self._control.steer = float(action[1])
+        self._control.brake = float(action[2])
+        self.player.apply_control(self._control)
+
+        # Advance the simulation
+        if self.sync:
+            self.world.tick()
+        else:
+            self.world.wait_for_tick()
+
+        # Get the new state
+        state = self.get_state()
+
+        # Calculate reward
+        reward = self._calculate_reward(state)
+
+        # Check if the episode is done
+        done = False
+
+        # Collect additional info if needed
+        info = {}
+
+        return state, reward, done, info
+    
+    def _calculate_reward(self, state):
+        # Example reward function
+        reward = 0.0
+
+        # Reward for moving forward
+        reward += state[6]
+
+        # Penalty for collision
+        if self.collision_sensor.get_collision_history():
+            reward -= 10.0
+
+        # Penalty for going off the road (simple example)
+        if state[1] < -10 or state[1] > 10:
+            reward -= 5.0
+
+        return reward
+    
+    def _is_done(self, state):
+        # Example done condition
+        # if self.collision_sensor.get_collision_history():
+        #     return True
+        # if state[1] < -10 or state[1] > 10:
+        #     return True
+        return False
 
 
 
@@ -416,6 +456,7 @@ class ModelControl(object):
         self._ackermann_enabled = False
         self._ackermann_reverse = 1
         self._marl_agent = marl_agent  # Initialize the MARL agent
+        self.world = world
         
         if isinstance(world.player, carla.Vehicle):
             self._control = carla.VehicleControl()
@@ -444,7 +485,7 @@ class ModelControl(object):
 
         if not self._autopilot_enabled:
             if isinstance(self._control, carla.VehicleControl):
-                self._apply_vehicle_control(world.player, action)
+                self._apply_vehicle_control(action)
                 self._control.reverse = self._control.gear < 0
                 # Set automatic control-related vehicle lights
                 if self._control.brake:
@@ -471,14 +512,12 @@ class ModelControl(object):
                 self._apply_walker_control(action)
                 world.player.apply_control(self._control)
 
-    def _apply_vehicle_control(self, player, action):
-        # Map the action to vehicle control commands
+    def _apply_vehicle_control(self, action):
+        action = action[0]  # Extract the first element from the nested list
         self._control.throttle = float(action[0])
         self._control.steer = float(action[1])
         self._control.brake = float(action[2])
-        self._control.reverse = bool(action[3])
-
-        player.apply_control(self._control)  # Apply control to the player
+        self.world.player.apply_control(self._control)
 
 
     def _apply_walker_control(self, action):
@@ -1105,6 +1144,7 @@ def game_loop(args):
         pygame.display.flip()
         hud = HUD(args.width, args.height)
         world = World(sim_world, hud, args)
+        
         if not world:
             raise RuntimeError("World initialization failed.")
         print(f"World initialized: {world is not None}")
@@ -1126,16 +1166,33 @@ def game_loop(args):
         else:
             sim_world.wait_for_tick()
 
-        clock = pygame.time.Clock()
-        while True:
-            if args.sync:
-                sim_world.tick()
-            clock.tick_busy_loop(60)
-            if controller.parse_events(client, world, clock, args.sync):
-                return
-            world.tick(clock)
-            world.render(display)
-            pygame.display.flip()
+            clock = pygame.time.Clock()
+            #sleep(10)
+            while True:
+                if controller.parse_events(client, world, clock, args.sync):
+                    return
+
+                state = world.get_state()
+                action = controller._marl_agent.action(state, 1)[0]
+
+                next_state, reward, done, info = world.step(action)
+
+                print("State:", state)
+                print("Action:", action)
+                print("Next State:", next_state)
+                print("Reward:", reward)
+                print("Done:", done)
+                print("Info:", info)
+
+                if done:
+                    print("Episode finished")
+                    break
+
+                world.tick(clock)
+                world.render(display)
+                pygame.display.flip()
+
+                clock.tick_busy_loop(60)
 
     finally:
 

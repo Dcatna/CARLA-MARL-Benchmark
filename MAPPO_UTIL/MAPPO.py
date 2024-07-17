@@ -232,14 +232,15 @@ class MAPPO:
     # predict softmax action based on state
 
     def _softmax_action(self, state, n_agents):
+        actions = []
         state_var = to_tensor_var([state], self.use_cuda)
-        softmax_action_vars = []
-
         for agent_id in range(n_agents):
-            softmax_action_var = F.softmax(self.actor(state_var[agent_id].unsqueeze(0)), dim=-1)
-            softmax_action_vars.append(softmax_action_var)
+            softmax_action_var = th.exp(self.actor(state_var[agent_id].unsqueeze(0)))
+            pi = softmax_action_var.cpu().data.numpy().flatten()
+            pi /= pi.sum()  # Normalize the probabilities
+            actions.append(pi)
+        return actions
 
-        return th.cat(softmax_action_vars, dim=0)
 
 
     # choose an action based on state with random noise added for exploration in training
@@ -252,19 +253,19 @@ class MAPPO:
 
     # choose an action based on state for execution
     def action(self, state, n_agents):
-        softmax_actions = self._softmax_action(state, n_agents)
-        softmax_actions = softmax_actions.cpu().detach().numpy()  # Ensure tensor is on the CPU
-
         actions = []
-        for i in range(n_agents):
-            pi = softmax_actions[i]
-            actions.append(np.random.choice(np.arange(len(pi)), p=pi / pi.sum()))  # Ensure probabilities sum to 1
-
-        # Ensure that the action list has at least 4 elements
-        if len(actions) < 4:
-            actions += [0] * (4 - len(actions))  # Add zero padding if necessary
-
+        state_var = to_tensor_var([state], self.use_cuda)
+        for agent_id in range(n_agents):
+            softmax_action_var = th.exp(self.actor(state_var[agent_id].unsqueeze(0)))
+            pi = softmax_action_var.cpu().data.numpy().flatten()
+            pi /= pi.sum()  # Normalize the probabilities
+            throttle = np.random.choice(np.arange(len(pi)), p=pi)
+            steer = np.random.choice(np.arange(len(pi)), p=pi)
+            brake = np.random.choice(np.arange(len(pi)), p=pi)
+            action = [throttle, steer, brake]
+            actions.append(action)
         return actions
+
 
 
 
