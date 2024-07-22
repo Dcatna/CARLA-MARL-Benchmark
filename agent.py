@@ -23,12 +23,21 @@ class ActorNetwork(nn.Module):
         return (size - (kernel_size - 1) - 1) // stride + 1
 
     def forward(self, x):
+        print(f"Input to conv1: {x}")
         x = F.relu(self.conv1(x))
+        print(f"Output of conv1: {x}")
         x = F.relu(self.conv2(x))
+        print(f"Output of conv2: {x}")
         x = F.relu(self.conv3(x))
-        x = x.reshape(x.size(0), -1)  # Flatten the tensor
+        print(f"Output of conv3: {x}")
+        x = x.reshape(x.size(0), -1)
+        print(f"Flattened output: {x}")
         x = F.relu(self.fc1(x))
-        return F.softmax(self.fc2(x), dim=1)
+        print(f"Output of fc1: {x}")
+        probs = F.softmax(self.fc2(x), dim=1)
+        print(f"Output of softmax: {probs}")
+        probs = torch.clamp(probs, min=1e-6)
+        return probs
 
 class CriticNetwork(nn.Module):
     def __init__(self, in_shape, hidden_size=512):
@@ -72,12 +81,28 @@ class Agent:
             self.critic = self.critic.cuda()
 
     def select_action(self, state):
-        state = torch.FloatTensor(state).unsqueeze(0)
-        if self.use_cuda:
-            state = state.cuda()
-        probs = self.actor(state)
-        action = probs.multinomial(1).detach().cpu().numpy()[0]
-        return action
+            state = torch.FloatTensor(state).unsqueeze(0)
+            if self.use_cuda:
+                state = state.cuda()
+            
+            # Clamping state to avoid extreme values
+            state = torch.clamp(state, -1.0, 1.0)
+            
+            assert not torch.isnan(state).any(), "NaN value detected in state input"
+            assert not torch.isinf(state).any(), "Infinite value detected in state input"
+            
+            probs = self.actor(state)
+            
+            # Additional debug information
+            print(f"State input: {state}")
+            print(f"Probabilities output: {probs}")
+
+            assert not torch.isnan(probs).any(), "NaN value detected in actor output"
+            assert not torch.isinf(probs).any(), "Infinite value detected in actor output"
+            
+            action = probs.multinomial(1).detach().cpu().numpy()[0]
+            return action
+
 
     def update(self, batch_size):
         if len(self.replay_buf) < batch_size:

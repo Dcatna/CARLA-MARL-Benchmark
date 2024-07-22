@@ -6,7 +6,7 @@ import time
 from time import sleep
 
 try:
-    sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
+    sys.path.append(glob.glob('../PythonAPI/carla/dist/carla-*%d.%d-%s.egg' % (
         sys.version_info.major,
         sys.version_info.minor,
         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
@@ -68,7 +68,7 @@ class InitializeEnv:
             else:
                 print(f"Not enough spawn points available for agent {i}, using default location")
                 transform = carla.Transform(carla.Location(x=230, y=195, z=40))
-
+            print(" ... SPAWNING VEHICLE ... ")
             vehicle = self.world.spawn_actor(self.model3, transform)
             self.vehicles.append(vehicle)
             self.actor_list.append(vehicle)
@@ -93,8 +93,8 @@ class InitializeEnv:
             sleep(.01)
 
         self.episode_start = time.time()
-        for vehicle in self.vehicles:
-            vehicle.apply_control(carla.VehicleControl(throttle=1.0, brake=0.0))
+        # for vehicle in self.vehicles:
+        #     vehicle.apply_control(carla.VehicleControl(throttle=1.0, brake=0.0))
 
         return [np.transpose(img, (2, 0, 1)) for img in self.images]  # Transpose images to [channels, height, width]
 
@@ -189,5 +189,5 @@ if __name__ == "__main__":
         'num_agents': num_agents  # Pass number of agents here
     }
     mappo = MAPPO(env, state_dim=state_dim, action_dim=action_dim, agent_params=agent_params)
-    mappo.run(num_episodes=1000, batch_size=16)
+    mappo.run(num_episodes=1000, batch_size=32)
 
