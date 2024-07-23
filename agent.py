@@ -91,45 +91,59 @@ class Agent:
         return action
 
     def update(self, batch_size):
-        if len(self.replay_buf) < batch_size:
+        if len(self.memory) < batch_size:
             return
 
-        states, actions, rewards, next_states, dones = self.replay_buf.sample(batch_size)
+        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
 
-        # Ensure the shapes are correct
-        states = states.reshape(batch_size, self.num_agents, *states.shape[1:])
-        next_states = next_states.reshape(batch_size, self.num_agents, *next_states.shape[1:])
-        dones = np.array(dones).reshape(batch_size, self.num_agents)
+        # Ensure the dimensions are correct
+        print(f"Original states shape: {states.shape}")
+        print(f"Original next_states shape: {next_states.shape}")
+        print(f"Original dones shape: {dones.shape}")
 
+        # Reshape to include agents dimension
+        states = states.reshape(batch_size, self.num_agents, *states.shape[2:])
+        next_states = next_states.reshape(batch_size, self.num_agents, *next_states.shape[2:])
+
+        print(f"Reshaped states shape: {states.shape}")
+        print(f"Reshaped next_states shape: {next_states.shape}")
+
+        # Convert to PyTorch tensors
         states = torch.FloatTensor(states)
-        actions = torch.LongTensor(actions).squeeze()  # Ensure actions is (batch_size, num_agents)
-        rewards = torch.FloatTensor(rewards).view(-1)  # Flatten rewards
+        actions = torch.LongTensor(actions).squeeze()  # Ensure actions is (batch_size * num_agents,)
+        rewards = torch.FloatTensor(rewards).view(batch_size, self.num_agents, -1)  # Reshape rewards
         next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(dones).view(-1)  # Flatten dones
+        dones = torch.FloatTensor(dones).view(batch_size, self.num_agents, -1)  # Reshape dones
 
         if self.use_cuda:
             states, actions, rewards, next_states, dones = states.cuda(), actions.cuda(), rewards.cuda(), next_states.cuda(), dones.cuda()
 
-        # Compute targets for the critic
-        with torch.no_grad():
-            next_values = self.critic(next_states)
-            print(f"Rewards shape: {rewards.shape}, Next values shape: {next_values.shape}, Dones shape: {dones.shape}")  # Debugging statement
-            target_values = rewards.view(batch_size, self.num_agents) + self.gamma * next_values * (1 - dones)
-            target_values = target_values.view(-1)  # Flatten to ensure correct shape
+        # Compute values and targets
+        values = self.critic(states).view(batch_size * self.num_agents, -1).mean(dim=1)
+        next_values = self.critic(next_states).view(batch_size * self.num_agents, -1).mean(dim=1)
+        next_values = next_values.view(batch_size * self.num_agents, -1)
 
-        values = self.critic(states).view(batch_size, self.num_agents, -1).mean(dim=2).mean(dim=1)
-        values = values.view(-1)  # Flatten to ensure correct shape
+        print(f"Values shape: {values.shape}")
+        print(f"Next values shape after critic: {next_values.shape}")
+
+        # Compute target values
+        target_values = rewards + self.gamma * next_values * (1 - dones)
+        target_values = target_values.view(batch_size * self.num_agents, -1)  # Ensure it matches values
+
+        # Ensure the dimensions for MSE loss match
+        if values.dim() == 1 and target_values.dim() == 2:
+            values = values.unsqueeze(1)  # Make values shape [batch_size * num_agents, 1]
+
+        assert values.shape == target_values.shape, f"Shape mismatch: values shape {values.shape}, target_values shape {target_values.shape}"
 
         # Critic loss
-        print(f"Values shape: {values.shape}")  # Debugging statement
-        print(f"Target values shape: {target_values.shape}")  # Debugging statement
         critic_loss = F.mse_loss(values, target_values)
 
         # Actor loss
         log_probs = self.actor(states)
-        print(f"log_probs shape: {log_probs.shape}")  # Debugging statement
-        print(f"actions shape: {actions.shape}")  # Debugging statement
-        log_probs = log_probs.gather(1, actions).log()
+        print(f"log_probs shape: {log_probs.shape}")
+        print(f"actions shape: {actions.shape}")
+        log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze().log()
         old_log_probs = log_probs.detach()
         advantages = target_values.view(-1, 1) - values.view(-1, 1)
         ratio = (log_probs - old_log_probs).exp()
@@ -177,7 +191,7 @@ class MAPPO:
         self.num_agents = agent_params['num_agents']
         self.max_steps = 1000  # Define the maximum number of steps per episode
         self.agents = []
-        self.replay_buf = ReplayBuffer(100000)
+        #self.replay_buf = ReplayBuffer(100000)
 
         for agent_id in range(self.num_agents):
             actor = ActorNetwork(state_dim, agent_params['actor_hidden_size'], action_dim)
@@ -194,7 +208,7 @@ class MAPPO:
             for step in range(self.max_steps):
                 actions = [agent.select_action(state) for agent, state in zip(self.agents, states)]
                 next_states, rewards, done = self.env.step(actions)
-                self.replay_buf.push(states, actions, rewards, next_states, done)
+                self.memory.push(states, actions, rewards, next_states, done)
                 states = next_states
                 if all(done):
                     break
