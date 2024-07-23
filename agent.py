@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from replaybuffer import ReplayBuffer
 import numpy as np
+import os
 
 class ActorNetwork(nn.Module):
     def __init__(self, in_shape, hidden_size, num_actions):  # Remove the extra parameter
@@ -90,78 +91,45 @@ class Agent:
         return action
 
     def update(self, batch_size):
-        if len(self.memory) < batch_size:
+        if len(self.replay_buf) < batch_size:
             return
 
-        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+        states, actions, rewards, next_states, dones = self.replay_buf.sample(batch_size)
 
-        # Ensure the dimensions are correct
-        total_elements_states = np.prod(states.shape)
-        total_elements_next_states = np.prod(next_states.shape)
-        total_elements_dones = np.prod(dones.shape)
-
-        print(f"Total elements in states: {total_elements_states}")
-        print(f"Original states shape: {states.shape}")
-        print(f"Original next_states shape: {next_states.shape}")
-        print(f"Total elements in next_states: {total_elements_next_states}")
-        print(f"Original dones shape: {dones.shape}")
-        print(f"Total elements in dones: {total_elements_dones}")
-
-        # Compute the expected shape after reshaping
-        expected_shape = (batch_size * self.num_agents, *states.shape[2:])
-        expected_elements = np.prod(expected_shape)
-
-        print(f"Expected shape: {expected_shape}")
-        print(f"Expected total elements: {expected_elements}")
-
-        if total_elements_states != expected_elements or total_elements_next_states != expected_elements:
-            print(f"Error: Total elements mismatch. States: {total_elements_states}, Expected: {expected_elements}")
-            return
-
-        if total_elements_dones != batch_size * self.num_agents:
-            print(f"Error: Total elements mismatch in dones. Dones: {total_elements_dones}, Expected: {batch_size * self.num_agents}")
-            return
-
-        states = states.reshape(*expected_shape)
-        next_states = next_states.reshape(*expected_shape)
-        print(f"Reshaped states shape: {states.shape}")
-        print(f"Reshaped next_states shape: {next_states.shape}")
+        # Ensure the shapes are correct
+        states = states.reshape(batch_size, self.num_agents, *states.shape[1:])
+        next_states = next_states.reshape(batch_size, self.num_agents, *next_states.shape[1:])
+        dones = np.array(dones).reshape(batch_size, self.num_agents)
 
         states = torch.FloatTensor(states)
         actions = torch.LongTensor(actions).squeeze()  # Ensure actions is (batch_size, num_agents)
-        rewards = torch.FloatTensor(rewards).view(batch_size * self.num_agents, -1)  # Reshape rewards
+        rewards = torch.FloatTensor(rewards).view(-1)  # Flatten rewards
         next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(dones).view(batch_size * self.num_agents)  # Reshape dones
+        dones = torch.FloatTensor(dones).view(-1)  # Flatten dones
 
         if self.use_cuda:
             states, actions, rewards, next_states, dones = states.cuda(), actions.cuda(), rewards.cuda(), next_states.cuda(), dones.cuda()
 
-        print(f"States shape after conversion: {states.shape}")
-        print(f"Next states shape after conversion: {next_states.shape}")
-        print(f"Actions shape: {actions.shape}")
-        print(f"Rewards shape: {rewards.shape}")
-        print(f"Dones shape: {dones.shape}")
-
         # Compute targets for the critic
         with torch.no_grad():
-            next_values = self.critic(next_states).view(batch_size * self.num_agents, -1).mean(dim=1)
-            print(f"Next values shape after critic: {next_values.shape}")
-            target_values = rewards + self.gamma * next_values * (1 - dones)
+            next_values = self.critic(next_states)
+            print(f"Rewards shape: {rewards.shape}, Next values shape: {next_values.shape}, Dones shape: {dones.shape}")  # Debugging statement
+            target_values = rewards.view(batch_size, self.num_agents) + self.gamma * next_values * (1 - dones)
             target_values = target_values.view(-1)  # Flatten to ensure correct shape
 
-        values = self.critic(states).view(batch_size * self.num_agents, -1).mean(dim=1)
+        values = self.critic(states).view(batch_size, self.num_agents, -1).mean(dim=2).mean(dim=1)
         values = values.view(-1)  # Flatten to ensure correct shape
 
         # Critic loss
-        print(f"Values shape: {values.shape}")
-        print(f"Target values shape: {target_values.shape}")
+        print(f"Values shape: {values.shape}")  # Debugging statement
+        print(f"Target values shape: {target_values.shape}")  # Debugging statement
         critic_loss = F.mse_loss(values, target_values)
 
         # Actor loss
         log_probs = self.actor(states)
-        print(f"log_probs shape: {log_probs.shape}")
-        print(f"actions shape: {actions.shape}")
-        log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze().log()
+        print(f"log_probs shape: {log_probs.shape}")  # Debugging statement
+        print(f"actions shape: {actions.shape}")  # Debugging statement
+        log_probs = log_probs.gather(1, actions).log()
         old_log_probs = log_probs.detach()
         advantages = target_values.view(-1, 1) - values.view(-1, 1)
         ratio = (log_probs - old_log_probs).exp()
@@ -177,6 +145,28 @@ class Agent:
         self.optimizer.step()
 
 
+
+    def save_model(self, directory, filename):
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        actor_path = os.path.join(directory, f"{filename}_actor.pth")
+        critic_path = os.path.join(directory, f"{filename}_critic.pth")
+        optimizer_path = os.path.join(directory, f"{filename}_optimizer.pth")
+
+        torch.save(self.actor.state_dict(), actor_path)
+        torch.save(self.critic.state_dict(), critic_path)
+        torch.save(self.optimizer.state_dict(), optimizer_path)
+
+    def load_model(self, directory, filename):
+        actor_path = os.path.join(directory, f"{filename}_actor.pth")
+        critic_path = os.path.join(directory, f"{filename}_critic.pth")
+        optimizer_path = os.path.join(directory, f"{filename}_optimizer.pth")
+
+        self.actor.load_state_dict(torch.load(actor_path))
+        self.critic.load_state_dict(torch.load(critic_path))
+        self.optimizer.load_state_dict(torch.load(optimizer_path))
+
+
 class MAPPO:
     def __init__(self, env, state_dim, action_dim, agent_params, memory_capacity=10000, use_cuda=True):
         self.env = env
@@ -185,7 +175,9 @@ class MAPPO:
         self.memory = ReplayBuffer(memory_capacity)
         self.use_cuda = use_cuda and torch.cuda.is_available()
         self.num_agents = agent_params['num_agents']
+        self.max_steps = 1000  # Define the maximum number of steps per episode
         self.agents = []
+        self.replay_buf = ReplayBuffer(100000)
 
         for agent_id in range(self.num_agents):
             actor = ActorNetwork(state_dim, agent_params['actor_hidden_size'], action_dim)
@@ -198,8 +190,16 @@ class MAPPO:
 
     def run(self, num_episodes, batch_size):
         for episode in range(num_episodes):
-            self.interact()
+            states = self.env.reset()
+            for step in range(self.max_steps):
+                actions = [agent.select_action(state) for agent, state in zip(self.agents, states)]
+                next_states, rewards, done = self.env.step(actions)
+                self.replay_buf.push(states, actions, rewards, next_states, done)
+                states = next_states
+                if all(done):
+                    break
             self.train(batch_size)
+
 
     def interact(self):
         states = self.env.reset()

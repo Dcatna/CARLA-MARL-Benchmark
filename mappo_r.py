@@ -105,7 +105,7 @@ class InitializeEnv:
 
     def collision_data(self, event, index):
         self.collision_hist[index].append(event)
-
+        
     def step(self, actions):
         for i, action in enumerate(actions):
             if len(action) != 3:
@@ -117,7 +117,16 @@ class InitializeEnv:
         self.render_camera(0)
         done = self.check_done()
         next_states = np.array([np.transpose(img, (2, 0, 1)) for img in self.images])
+
+        # Ensure the shape of next_states is as expected
+        next_states = next_states.reshape(self.num_agents, 3, 480, 640)
+
+        # Ensure done is a list with the correct length
+        done = np.array(done).reshape(self.num_agents)
+
         return next_states, rewards, done
+
+
 
     def compute_reward(self, agent_index):
         if self.collision_hist[agent_index]:
@@ -126,8 +135,8 @@ class InitializeEnv:
 
     def check_done(self):
         if any(self.collision_hist) or (time.time() - self.episode_start) > SEC_PER_EP:
-            return True
-        return False
+            return [True] * self.num_agents
+        return [False] * self.num_agents
 
     def render_camera(self, index):
         if self.images[index] is not None:
