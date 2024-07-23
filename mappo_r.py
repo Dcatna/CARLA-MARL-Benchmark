@@ -30,13 +30,6 @@ IM_HEIGHT = 480
 SHOW_P = False
 SEC_PER_EP = 10
 
-###############################################
-#
-#     WORLD CLASS
-#
-###############################################
-
-
 class InitializeEnv:
     def __init__(self, num_agents):
         self.client = carla.Client("localhost", 2000)
@@ -52,7 +45,16 @@ class InitializeEnv:
         self.images = [None] * num_agents
         self.collision_hist = [[] for _ in range(num_agents)]
 
+        pygame.init()
+        self.display = pygame.display.set_mode((self.im_width, self.im_height))
+        pygame.display.set_caption("CARLA Camera")
+
     def reset(self):
+        for vehicle in self.vehicles:
+            vehicle.destroy()
+        for sensor in self.sensors:
+            sensor.destroy()
+
         self.collision_hist = [[] for _ in range(self.num_agents)]
         self.actor_list = []
         self.vehicles = []
@@ -68,7 +70,7 @@ class InitializeEnv:
             else:
                 print(f"Not enough spawn points available for agent {i}, using default location")
                 transform = carla.Transform(carla.Location(x=230, y=195, z=40))
-            print(" ... SPAWNING VEHICLE ... ")
+
             vehicle = self.world.spawn_actor(self.model3, transform)
             self.vehicles.append(vehicle)
             self.actor_list.append(vehicle)
@@ -93,10 +95,7 @@ class InitializeEnv:
             sleep(.01)
 
         self.episode_start = time.time()
-        # for vehicle in self.vehicles:
-        #     vehicle.apply_control(carla.VehicleControl(throttle=1.0, brake=0.0))
-
-        return [np.transpose(img, (2, 0, 1)) for img in self.images]  # Transpose images to [channels, height, width]
+        return np.array([np.transpose(img, (2, 0, 1)) for img in self.images])
 
     def process_image(self, image, index):
         i = np.array(image.raw_data)
@@ -110,69 +109,37 @@ class InitializeEnv:
     def step(self, actions):
         for i, action in enumerate(actions):
             if len(action) != 3:
-                action = [0.0, 0.0, 1.0]  # Default action (full brake) if the action is invalid
+                action = [0.0, 0.0, 1.0]
+            print(f"Applying control to vehicle {i}: throttle={action[0]}, steer={action[1]}, brake={action[2]}")
             self.vehicles[i].apply_control(carla.VehicleControl(throttle=action[0], steer=action[1], brake=action[2]))
 
         rewards = [self.compute_reward(i) for i in range(self.num_agents)]
+        self.render_camera(0)
         done = self.check_done()
-        next_states = [np.transpose(img, (2, 0, 1)) for img in self.images]  # Transpose images to [channels, height, width]
+        next_states = np.array([np.transpose(img, (2, 0, 1)) for img in self.images])
         return next_states, rewards, done
 
     def compute_reward(self, agent_index):
         if self.collision_hist[agent_index]:
-            return -1  # Penalize collisions
-        return 1  # Reward for staying on track
+            return -1
+        return 1
 
     def check_done(self):
         if any(self.collision_hist) or (time.time() - self.episode_start) > SEC_PER_EP:
             return True
         return False
 
-
-
-
-    
-##################################################
-#
-#       Networks Actor and Critic
-#
-##################################################
-
-##################################################
-#
-#     Game LOOOP
-#
-##################################################
-
-def game_loop():
-    pygame.init()
-    pygame.font.init()
-    display = pygame.display.set_mode((IM_WIDTH, IM_HEIGHT), pygame.HWSURFACE | pygame.DOUBLEBUF)
-
-    env = InitializeEnv()
-    front_cam = env.reset()
-
-    clock = pygame.time.Clock()
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return
-
-        if env.front_cam is not None:
-            frame = pygame.surfarray.make_surface(env.front_cam.swapaxes(0, 1))
-            display.blit(frame, (0, 0))
+    def render_camera(self, index):
+        if self.images[index] is not None:
+            image = self.images[index]
+            image = np.fliplr(image)
+            image = pygame.surfarray.make_surface(image.swapaxes(0, 1))
+            self.display.blit(image, (0, 0))
             pygame.display.flip()
-
-        clock.tick_busy_loop(60)
-
-    pygame.quit()
-
-# if __name__ == "__main__":
-#     game_loop()
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
-    num_agents = 2  # Example for 2 agents
+    num_agents = 2
     env = InitializeEnv(num_agents)
     state_dim = (3, 480, 640)
     action_dim = 3
@@ -184,10 +151,9 @@ if __name__ == "__main__":
         'actor_lr': 0.0001,
         'critic_lr': 0.0001,
         'reward_gamma': 0.99,
-        'clip_param': 0.2,
-        'use_cuda': True,
-        'num_agents': num_agents  # Pass number of agents here
+        'clip_epsilon': 0.2,
+        'num_agents': num_agents,
+        
     }
     mappo = MAPPO(env, state_dim=state_dim, action_dim=action_dim, agent_params=agent_params)
-    mappo.run(num_episodes=1000, batch_size=32)
-
+    mappo.run(num_episodes=1000, batch_size=16)
