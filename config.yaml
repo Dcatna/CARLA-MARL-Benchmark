@@ -1,0 +1,18 @@
+environment:
+  im_width: 640
+  im_height: 480
+  show_p: False
+  sec_per_ep: 10
+
+agent:
+  num_agents: 2
+  actor_hidden_size: 128
+  critic_hidden_size: 128
+  actor_output_act: log_softmax
+  memory_capacity: 10000
+  actor_lr: 0.0001
+  critic_lr: 0.0001
+  reward_gamma: 0.99
+  clip_epsilon: 0.2
+  num_episodes: 1000
+  batch_size: 16
