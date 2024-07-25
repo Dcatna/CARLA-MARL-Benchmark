@@ -89,7 +89,7 @@ class Agent:
         action = probs.multinomial(1).detach().cpu().numpy()[0]
         action = [float(a) for a in action] + [0.0] * (3 - len(action))
         return action
-
+    
     def update(self, batch_size):
         if len(self.memory) < batch_size:
             return
@@ -111,28 +111,33 @@ class Agent:
         # Convert to PyTorch tensors
         states = torch.FloatTensor(states)
         actions = torch.LongTensor(actions).squeeze()  # Ensure actions is (batch_size * num_agents,)
-        rewards = torch.FloatTensor(rewards).view(batch_size, self.num_agents, -1)  # Reshape rewards
+        rewards = torch.FloatTensor(rewards).view(batch_size, self.num_agents)  # Reshape rewards
         next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(dones).view(batch_size, self.num_agents, -1)  # Reshape dones
+        dones = torch.FloatTensor(dones).view(batch_size, self.num_agents)  # Reshape dones
 
         if self.use_cuda:
             states, actions, rewards, next_states, dones = states.cuda(), actions.cuda(), rewards.cuda(), next_states.cuda(), dones.cuda()
 
         # Compute values and targets
-        values = self.critic(states).view(batch_size * self.num_agents, -1).mean(dim=1)
-        next_values = self.critic(next_states).view(batch_size * self.num_agents, -1).mean(dim=1)
-        next_values = next_values.view(batch_size * self.num_agents, -1)
+        values = self.critic(states).view(batch_size * self.num_agents)
+        next_values = self.critic(next_states).view(batch_size * self.num_agents, 1)
 
         print(f"Values shape: {values.shape}")
         print(f"Next values shape after critic: {next_values.shape}")
 
+        # Debugging shapes before the error
+        print(f"Rewards shape: {rewards.shape}")
+        print(f"Dones shape: {dones.shape}")
+        print(f"Next values shape before target calculation: {next_values.shape}")
+
         # Compute target values
-        target_values = rewards + self.gamma * next_values * (1 - dones)
-        target_values = target_values.view(batch_size * self.num_agents, -1)  # Ensure it matches values
+        target_values = rewards + self.gamma * next_values.squeeze() * (1 - dones)
+        target_values = target_values.view(batch_size * self.num_agents)  # Ensure it matches values
 
         # Ensure the dimensions for MSE loss match
-        if values.dim() == 1 and target_values.dim() == 2:
+        if values.dim() == 1 and target_values.dim() == 1:
             values = values.unsqueeze(1)  # Make values shape [batch_size * num_agents, 1]
+            target_values = target_values.unsqueeze(1)  # Make target_values shape [batch_size * num_agents, 1]
 
         assert values.shape == target_values.shape, f"Shape mismatch: values shape {values.shape}, target_values shape {target_values.shape}"
 
@@ -157,8 +162,6 @@ class Agent:
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.optimizer.step()
-
-
 
     def save_model(self, directory, filename):
         if not os.path.exists(directory):

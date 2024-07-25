@@ -45,10 +45,20 @@ class InitializeEnv:
         self.sensors = []
         self.images = [None] * self.num_agents
         self.collision_hist = [[] for _ in range(self.num_agents)]
+        try:
+            self.map = self.world.get_map()
+        except RuntimeError as error:
+            print('RuntimeError: {}'.format(error))
+            print('  The server could not send the OpenDRIVE (.xodr) file:')
+            print('  Make sure it exists, has the same name of your town, and is correct.')
+            sys.exit(1)
 
         pygame.init()
         self.display = pygame.display.set_mode((self.im_width, self.im_height))
         pygame.display.set_caption("CARLA Camera")
+
+        self.spawn_points = self.map.get_spawn_points()
+        self.spawn_point = random.choice(self.spawn_points) if self.spawn_points else None
 
         # Define custom spawn points
         self.custom_spawn_points = [
@@ -73,16 +83,23 @@ class InitializeEnv:
         self.collision_hist = [[] for _ in range(self.num_agents)]
     
     def _spawn_vehicles(self):
-        for i in range(self.num_agents):
-            if i < len(self.custom_spawn_points):
-                transform = self.custom_spawn_points[i]
-            else:
-                print(f"Not enough custom spawn points available for agent {i}, using default location")
-                transform = carla.Transform(carla.Location(x=160, y=-175, z=10))
+        if self.spawn_point == None:
+            for i in range(self.num_agents):
+                if i < len(self.custom_spawn_points):
+                    transform = self.custom_spawn_points[i]
+                else:
+                    print(f"Not enough custom spawn points available for agent {i}, using default location")
+                    transform = carla.Transform(carla.Location(x=160, y=-175, z=10))
 
-            vehicle = self.world.spawn_actor(self.model3, transform)
-            self.vehicles.append(vehicle)
-            self._attach_sensors(vehicle, i)
+                vehicle = self.world.spawn_actor(self.model3, transform)
+                self.vehicles.append(vehicle)
+                self._attach_sensors(vehicle, i)
+        else:
+            for i in range(self.num_agents):
+                transform = random.choice(self.spawn_points)
+                vehicle = self.world.spawn_actor(self.model3, transform)
+                self.vehicles.append(vehicle)
+                self._attach_sensors(vehicle, i)
     
     def _attach_sensors(self, vehicle, index):
         rgb_cam = self.bp_library.find("sensor.camera.rgb")
