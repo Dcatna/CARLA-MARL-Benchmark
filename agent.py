@@ -6,32 +6,6 @@ from replaybuffer import ReplayBuffer
 import numpy as np
 import os
 
-class ActorNetwork(nn.Module):
-    def __init__(self, in_shape, hidden_size, num_actions):  # Remove the extra parameter
-        super(ActorNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(in_shape[0], 16, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(32, 32, kernel_size=3, stride=1)
-        
-        # Calculate the size of the output from the conv layers
-        convw = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[1], 8, 4), 4, 2), 3, 1)
-        convh = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[2], 8, 4), 4, 2), 3, 1)
-        linear_input_size = convw * convh * 32
-
-        self.fc1 = nn.Linear(linear_input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, num_actions)
-
-    def conv2d_size_out(self, size, kernel_size, stride):
-        return (size - (kernel_size - 1) - 1) // stride + 1
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)  # Flatten the tensor
-        x = F.relu(self.fc1(x))
-        return F.softmax(self.fc2(x), dim=1)
-    
 class CriticNetwork(nn.Module):
     def __init__(self, in_shape, hidden_size):
         super(CriticNetwork, self).__init__()
@@ -55,7 +29,7 @@ class CriticNetwork(nn.Module):
         while len(x.shape) > 5:  # Squeeze unnecessary dimensions
             x = x.squeeze(1)
         batch_size, num_agents, channels, height, width = x.shape
-        x = x.view(-1, channels, height, width)  # Combine batch_size and num_agents for conv layers
+        x = x.view(batch_size * num_agents, channels, height, width)  # Combine batch_size and num_agents for conv layers
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
@@ -63,6 +37,38 @@ class CriticNetwork(nn.Module):
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x.view(batch_size, num_agents)  # Reshape back to [batch_size, num_agents]
+
+class ActorNetwork(nn.Module):
+    def __init__(self, in_shape, hidden_size, num_actions):
+        super(ActorNetwork, self).__init__()
+        self.conv1 = nn.Conv2d(in_shape[0], 16, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(32, 32, kernel_size=3, stride=1)
+        
+        # Calculate the size of the output from the conv layers
+        convw = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[1], 8, 4), 4, 2), 3, 1)
+        convh = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[2], 8, 4), 4, 2), 3, 1)
+        linear_input_size = convw * convh * 32
+
+        self.fc1 = nn.Linear(linear_input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, num_actions)
+
+    def conv2d_size_out(self, size, kernel_size, stride):
+        return (size - (kernel_size - 1) - 1) // stride + 1
+
+    def forward(self, x):
+        print(f"Input shape to ActorNetwork: {x.shape}")  # Debugging statement
+        while len(x.shape) > 5:  # Squeeze unnecessary dimensions
+            x = x.squeeze(1)
+        batch_size, num_agents, channels, height, width = x.shape
+        x = x.view(batch_size * num_agents, channels, height, width)  # Combine batch_size and num_agents for conv layers
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = F.relu(self.fc1(x))
+        return F.softmax(self.fc2(x), dim=1)
+
 
 
 class Agent:
@@ -82,53 +88,70 @@ class Agent:
             self.critic = self.critic.cuda()
 
     def select_action(self, state):
-        state = torch.FloatTensor(state).unsqueeze(0)
+        state = torch.FloatTensor(state).unsqueeze(0)  # Add batch dimension
         if self.use_cuda:
             state = state.cuda()
+        print(f"Input shape to ActorNetwork: {state.shape}")  # Debugging statement
+        if state.dim() == 4:  # Check if the state tensor has 4 dimensions
+            state = state.unsqueeze(1)  # Add num_agents dimension if missing
         probs = self.actor(state)
+        if torch.any(torch.isnan(probs)) or torch.any(torch.isinf(probs)):
+            raise ValueError("Probs tensor contains NaN or Inf values")
         action = probs.multinomial(1).detach().cpu().numpy()[0]
         action = [float(a) for a in action] + [0.0] * (3 - len(action))
         return action
 
+
+        
     def update(self, batch_size):
         if len(self.memory) < batch_size:
             return
 
         states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
 
-        # Ensure the dimensions are correct
-        print(f"Original states shape: {states.shape}")
-        print(f"Original next_states shape: {next_states.shape}")
-        print(f"Original dones shape: {dones.shape}")
+        # Convert NumPy arrays to PyTorch tensors
+        states = torch.tensor(states, dtype=torch.float32)
+        actions = torch.tensor(actions, dtype=torch.long)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        next_states = torch.tensor(next_states, dtype=torch.float32)
+        dones = torch.tensor(dones, dtype=torch.float32)
 
-        # Reshape to include agents dimension
-        states = states.reshape(batch_size, self.num_agents, *states.shape[2:])
-        next_states = next_states.reshape(batch_size, self.num_agents, *next_states.shape[2:])
-
-        print(f"Reshaped states shape: {states.shape}")
-        print(f"Reshaped next_states shape: {next_states.shape}")
-
-        # Convert to PyTorch tensors
-        states = torch.FloatTensor(states)
-        actions = torch.LongTensor(actions).squeeze()  # Ensure actions is (batch_size * num_agents,)
-        rewards = torch.FloatTensor(rewards).view(batch_size, self.num_agents, -1)  # Reshape rewards
-        next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(dones).view(batch_size, self.num_agents, -1)  # Reshape dones
-
+        # Move tensors to GPU if needed
         if self.use_cuda:
             states, actions, rewards, next_states, dones = states.cuda(), actions.cuda(), rewards.cuda(), next_states.cuda(), dones.cuda()
+
+        # Ensure the tensors have the correct shape
+        if states.dim() == 4:
+            states = states.unsqueeze(2)  # Add the num_frames dimension
+            next_states = next_states.unsqueeze(2)
+
+        # Reshape states and next_states
+        states = states.reshape(batch_size, self.num_agents, 3, 480, 640)
+        next_states = next_states.reshape(batch_size, self.num_agents, 3, 480, 640)
+
+        # Ensure shapes match
+        print(f"Reshaped states shape: {states.shape}")
+        print(f"Reshaped next_states shape: {next_states.shape}")
 
         # Compute values and targets
         values = self.critic(states).view(batch_size * self.num_agents, -1).mean(dim=1)
         next_values = self.critic(next_states).view(batch_size * self.num_agents, -1).mean(dim=1)
-        next_values = next_values.view(batch_size * self.num_agents, -1)
 
-        print(f"Values shape: {values.shape}")
-        print(f"Next values shape after critic: {next_values.shape}")
+        # Reshape next_values for compatibility
+        next_values = next_values.view(batch_size, self.num_agents, -1)
+
+        # Reshape rewards and dones
+        rewards = rewards.view(batch_size, self.num_agents, -1)
+        dones = dones.view(batch_size, self.num_agents, -1)
 
         # Compute target values
         target_values = rewards + self.gamma * next_values * (1 - dones)
-        target_values = target_values.view(batch_size * self.num_agents, -1)  # Ensure it matches values
+        target_values = target_values.view(batch_size * self.num_agents, -1)  # Ensure shape matches values
+
+        # Check shapes for debugging
+        print(f"Values shape: {values.shape}")
+        print(f"Next values shape after critic: {next_values.shape}")
+        print(f"Target values shape: {target_values.shape}")
 
         # Ensure the dimensions for MSE loss match
         if values.dim() == 1 and target_values.dim() == 2:
@@ -143,7 +166,8 @@ class Agent:
         log_probs = self.actor(states)
         print(f"log_probs shape: {log_probs.shape}")
         print(f"actions shape: {actions.shape}")
-        log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze().log()
+        actions = actions.view(batch_size * self.num_agents, -1)  # Ensure actions shape matches log_probs
+        log_probs = log_probs.gather(1, actions).squeeze().log()
         old_log_probs = log_probs.detach()
         advantages = target_values.view(-1, 1) - values.view(-1, 1)
         ratio = (log_probs - old_log_probs).exp()
@@ -157,6 +181,8 @@ class Agent:
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.optimizer.step()
+
+
 
 
 
