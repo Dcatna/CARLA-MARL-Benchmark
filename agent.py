@@ -1,245 +1,400 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F 
+import torch.nn.functional as F
+import numpy as np
 from torch.optim import Adam
 from replaybuffer import ReplayBuffer
-import numpy as np
 import os
+import matplotlib.pyplot as plt
+import copy
 
-class CriticNetwork(nn.Module):
-    def __init__(self, in_shape, hidden_size):
-        super(CriticNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(in_shape[0], 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
-        
-        # Calculate the size of the output from the conv layers
-        convw = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[1], 8, 4), 4, 2), 3, 1)
-        convh = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[2], 8, 4), 4, 2), 3, 1)
-        linear_input_size = convw * convh * 64  # 64 is the number of output channels of the last conv layer
+torch.autograd.set_detect_anomaly(True)
 
-        self.fc1 = nn.Linear(linear_input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, 1)
-
-    def conv2d_size_out(self, size, kernel_size, stride):
-        return (size - (kernel_size - 1) - 1) // stride + 1
-
-    def forward(self, x):
-        print(f"Input shape to CriticNetwork: {x.shape}")  # Debugging statement
-        while len(x.shape) > 5:  # Squeeze unnecessary dimensions
-            x = x.squeeze(1)
-        batch_size, num_agents, channels, height, width = x.shape
-        x = x.view(batch_size * num_agents, channels, height, width)  # Combine batch_size and num_agents for conv layers
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)  # Flatten the tensor
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x.view(batch_size, num_agents)  # Reshape back to [batch_size, num_agents]
 
 class ActorNetwork(nn.Module):
-    def __init__(self, in_shape, hidden_size, num_actions):
+    """
+    A network for actor
+    """
+
+    def __init__(self, state_dim, hidden_size, output_size, output_act):
         super(ActorNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(in_shape[0], 16, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(32, 32, kernel_size=3, stride=1)
-        
-        # Calculate the size of the output from the conv layers
-        convw = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[1], 8, 4), 4, 2), 3, 1)
-        convh = self.conv2d_size_out(self.conv2d_size_out(self.conv2d_size_out(in_shape[2], 8, 4), 4, 2), 3, 1)
-        linear_input_size = convw * convh * 32
+        self.fc1 = nn.Linear(state_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size)
+        # activation function for the output
+        self.output_act = output_act
 
-        self.fc1 = nn.Linear(linear_input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, num_actions)
+    def __call__(self, state):
+        out = nn.functional.relu(self.fc1(state))
+        out = nn.functional.relu(self.fc2(out))
+        out = self.output_act(self.fc3(out), dim=1)  # Specify the dimension for log softmax
+        return out
 
-    def conv2d_size_out(self, size, kernel_size, stride):
-        return (size - (kernel_size - 1) - 1) // stride + 1
+    def get_log_probs(self, state, action):
+        log_probs = self(state)
+        selected_log_probs = log_probs.gather(1, action.argmax(dim=1, keepdim=True)).squeeze(-1)
+        return selected_log_probs
 
-    def forward(self, x):
-        print(f"Input shape to ActorNetwork: {x.shape}")  # Debugging statement
-        while len(x.shape) > 5:  # Squeeze unnecessary dimensions
-            x = x.squeeze(1)
-        batch_size, num_agents, channels, height, width = x.shape
-        x = x.view(batch_size * num_agents, channels, height, width)  # Combine batch_size and num_agents for conv layers
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)  # Flatten the tensor
-        x = F.relu(self.fc1(x))
-        return F.softmax(self.fc2(x), dim=1)
+    def get_old_log_probs(self, state, action):
+        log_probs = self(state)
+        selected_log_probs = log_probs.gather(1, action.argmax(dim=1, keepdim=True)).squeeze(-1)
+        return selected_log_probs
+
+
+
+class CriticNetwork(nn.Module):
+    """
+    A network for critic
+    """
+
+    def __init__(self, state_dim, action_dim, hidden_size, num_agents=2, output_size=1):
+        super(CriticNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size + action_dim, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, output_size * num_agents)  # Output size multiplied by number of agents
+        self.num_agents = num_agents
+
+    def forward(self, state, action):
+        out = nn.functional.relu(self.fc1(state))
+        print(f"Shape of state features after fc1: {out.shape}")
+        print(f"Shape of action before concat: {action.shape}")
+        out = torch.cat([out, action], 1)
+        print(f"Shape after concatenation: {out.shape}")
+        out = nn.functional.relu(self.fc2(out))
+        out = self.fc3(out)
+        out = out.view(-1, self.num_agents)  # Reshape to [batch_size, num_agents]
+        return out
+
 
 
 
 class Agent:
-    def __init__(self, actor, critic, replay_buf, optimizer, gamma=0.99, clip_epsilon=0.2, use_cuda=True, num_agents=2):
+    def __init__(self, actor, critic, memory, optimizer, gamma, clip_epsilon, use_cuda, num_agents, epsilon=1, epsilon_decay=0.995, epsilon_min=0.01, action_dim=6, max_grad_norm=0.5, target_update_steps=5):
         self.actor = actor
         self.critic = critic
-        self.replay_buf = replay_buf
+        self.memory = memory
         self.optimizer = optimizer
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
-        self.use_cuda = use_cuda and torch.cuda.is_available()
+        self.use_cuda = use_cuda
         self.num_agents = num_agents
-        self.memory = replay_buf
+        self.epsilon = epsilon
+        self.epsilon_decay = epsilon_decay
+        self.epsilon_min = epsilon_min
+        self.device = torch.device("cuda" if use_cuda else "cpu")
+        self.criterion = nn.MSELoss()
+        self.action_dim = action_dim
+        self.max_grad_norm = max_grad_norm
+        self.target_update_steps = target_update_steps
+        self.n_episodes = 0
+
+        # Initialize composite actions
+        self.composite_actions = [
+            (1, 0, 0),  # Accelerate
+            (0, -1, 0),  # Steer full left
+            (0, 1, 0),  # Steer full right
+            (0, 0, 1),  # Brake
+            (1, -1, 0),  # Accelerate and steer full left
+            (1, 1, 0),  # Accelerate and steer full right
+        ]
+        self.actor_target = copy.deepcopy(actor)
+        self.critic_target = copy.deepcopy(critic)
 
         if self.use_cuda:
-            self.actor = self.actor.cuda()
-            self.critic = self.critic.cuda()
-
-    def select_action(self, state):
-        state = torch.FloatTensor(state).unsqueeze(0)  # Add batch dimension
-        if self.use_cuda:
-            state = state.cuda()
-        print(f"Input shape to ActorNetwork: {state.shape}")  # Debugging statement
-        if state.dim() == 4:  # Check if the state tensor has 4 dimensions
-            state = state.unsqueeze(1)  # Add num_agents dimension if missing
-        probs = self.actor(state)
-        if torch.any(torch.isnan(probs)) or torch.any(torch.isinf(probs)):
-            raise ValueError("Probs tensor contains NaN or Inf values")
-        action = probs.multinomial(1).detach().cpu().numpy()[0]
-        action = [float(a) for a in action] + [0.0] * (3 - len(action))
-        return action
-
-
+            self.actor.cuda()
+            self.critic.cuda()
+            self.actor_target.cuda()
+            self.critic_target.cuda()
         
+        # Initialize weights
+        self.actor.apply(self.initialize_weights)
+        self.critic.apply(self.initialize_weights)
+        self.image_shape = (3, 480, 640)
+        self.state_shape = (12,)
+
+        self.action_counter = {i: 0 for i in range(len(self.composite_actions))}
+    def select_action(self, state):
+        other_state = torch.tensor(state['state'], dtype=torch.float32).unsqueeze(0).to(self.device)
+
+        if np.random.rand() < self.epsilon:
+            print("GGREEDY ACCTION\n\n\n")
+            action_idx = np.random.choice(len(self.composite_actions))
+        else:
+            with torch.no_grad():
+                probs = F.softmax(self.actor(other_state), dim=1)
+            print("NON GREEDDY")
+            action_idx = np.argmax(probs.cpu().numpy().flatten())
+        self.action_counter[action_idx] += 1
+
+        return action_idx
+
     def update(self, batch_size):
         if len(self.memory) < batch_size:
-            return
+            return None  # No update if not enough samples
 
-        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+        batch = self.memory.sample(batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
 
-        # Convert NumPy arrays to PyTorch tensors
-        states = torch.tensor(states, dtype=torch.float32)
-        actions = torch.tensor(actions, dtype=torch.long)
-        rewards = torch.tensor(rewards, dtype=torch.float32)
-        next_states = torch.tensor(next_states, dtype=torch.float32)
-        dones = torch.tensor(dones, dtype=torch.float32)
+        states = torch.tensor(np.stack([s['state'] for s in states]), dtype=torch.float32).to(self.device)
+        next_states = torch.tensor(np.stack([s['state'] for s in next_states]), dtype=torch.float32).to(self.device)
+        actions = torch.tensor(actions).to(self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        dones = torch.tensor(dones, dtype=torch.float32).to(self.device)
 
-        # Move tensors to GPU if needed
-        if self.use_cuda:
-            states, actions, rewards, next_states, dones = states.cuda(), actions.cuda(), rewards.cuda(), next_states.cuda(), dones.cuda()
+        # One-hot encode the actions
+        actions = torch.nn.functional.one_hot(actions, num_classes=self.action_dim).float()
 
-        # Ensure the tensors have the correct shape
-        if states.dim() == 4:
-            states = states.unsqueeze(2)  # Add the num_frames dimension
-            next_states = next_states.unsqueeze(2)
+        rewards = self.normalize_rewards(rewards.view(batch_size, self.num_agents))
+        dones = dones.view(batch_size, self.num_agents)
 
-        # Reshape states and next_states
-        states = states.reshape(batch_size, self.num_agents, 3, 480, 640)
-        next_states = next_states.reshape(batch_size, self.num_agents, 3, 480, 640)
+        state_features = states
+        next_state_features = next_states
 
-        # Ensure shapes match
-        print(f"Reshaped states shape: {states.shape}")
-        print(f"Reshaped next_states shape: {next_states.shape}")
+        critic_values = self.critic(state_features, actions)
+        next_critic_values = self.critic(next_state_features, actions).detach()
 
-        # Compute values and targets
-        values = self.critic(states).view(batch_size * self.num_agents, -1).mean(dim=1)
-        next_values = self.critic(next_states).view(batch_size * self.num_agents, -1).mean(dim=1)
+        # Debugging to check dimensions
+        print(f"Shape of critic_values: {critic_values.shape}")
+        print(f"Shape of next_critic_values: {next_critic_values.shape}")
 
-        # Reshape next_values for compatibility
-        next_values = next_values.view(batch_size, self.num_agents, -1)
+        # Reshape only if the total size matches
+        if next_critic_values.numel() == batch_size * self.num_agents:
+            next_values = next_critic_values.view(batch_size, self.num_agents)
+        else:
+            next_values = next_critic_values.view(batch_size, -1)
 
-        # Reshape rewards and dones
-        rewards = rewards.view(batch_size, self.num_agents, -1)
-        dones = dones.view(batch_size, self.num_agents, -1)
+        target_values = rewards + (self.gamma * next_values * (1 - dones))
+        advantages = target_values - critic_values.view(batch_size, self.num_agents)
+        advantages = (advantages - advantages.mean(dim=0)) / (advantages.std(dim=0) + 1e-5)
+        advantages = advantages.mean(dim=1).unsqueeze(-1)
 
-        # Compute target values
-        target_values = rewards + self.gamma * next_values * (1 - dones)
-        target_values = target_values.view(batch_size * self.num_agents, -1)  # Ensure shape matches values
+        log_probs = self.actor.get_log_probs(states, actions)
+        old_log_probs = self.actor.get_old_log_probs(states, actions).detach()
 
-        # Check shapes for debugging
-        print(f"Values shape: {values.shape}")
-        print(f"Next values shape after critic: {next_values.shape}")
-        print(f"Target values shape: {target_values.shape}")
-
-        # Ensure the dimensions for MSE loss match
-        if values.dim() == 1 and target_values.dim() == 2:
-            values = values.unsqueeze(1)  # Make values shape [batch_size * num_agents, 1]
-
-        assert values.shape == target_values.shape, f"Shape mismatch: values shape {values.shape}, target_values shape {target_values.shape}"
-
-        # Critic loss
-        critic_loss = F.mse_loss(values, target_values)
-
-        # Actor loss
-        log_probs = self.actor(states)
-        print(f"log_probs shape: {log_probs.shape}")
-        print(f"actions shape: {actions.shape}")
-        actions = actions.view(batch_size * self.num_agents, -1)  # Ensure actions shape matches log_probs
-        log_probs = log_probs.gather(1, actions).squeeze().log()
-        old_log_probs = log_probs.detach()
-        advantages = target_values.view(-1, 1) - values.view(-1, 1)
-        ratio = (log_probs - old_log_probs).exp()
+        ratio = torch.exp(log_probs - old_log_probs)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
-        actor_loss = -torch.min(surr1, surr2).mean()
+        policy_loss = -torch.min(surr1, surr2).mean()
 
-        # Backpropagation
-        self.optimizer.zero_grad()
-        (actor_loss + critic_loss).backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+        self.optimizer.zero_grad(set_to_none=True)
+        policy_loss.backward(retain_graph=True)
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+
+        target_values = target_values.view(batch_size * self.num_agents, -1)
+        critic_values = critic_values.view(batch_size * self.num_agents, -1)
+        value_loss = self.criterion(critic_values, target_values)
+        value_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.optimizer.step()
 
+        if self.n_episodes % self.target_update_steps == 0:
+            self.soft_update(self.actor_target, self.actor)
+            self.soft_update(self.critic_target, self.critic)
+
+        for name, param in self.actor.named_parameters():
+            if param.grad is not None:
+                print(f"{name} gradient: {param.grad.norm()}")
+
+        self.n_episodes += 1
+
+        print(f"Critic loss: {value_loss.item()}")
+        print(f"Policy loss: {policy_loss.item()}")
+
+        return value_loss.item()
 
 
 
 
-    def save_model(self, directory, filename):
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        actor_path = os.path.join(directory, f"{filename}_actor.pth")
-        critic_path = os.path.join(directory, f"{filename}_critic.pth")
-        optimizer_path = os.path.join(directory, f"{filename}_optimizer.pth")
 
-        torch.save(self.actor.state_dict(), actor_path)
-        torch.save(self.critic.state_dict(), critic_path)
-        torch.save(self.optimizer.state_dict(), optimizer_path)
+    def check_for_nans(self, tensor, name):
+        if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
+            raise ValueError(f"{name} contains NaN or Inf values")
 
-    def load_model(self, directory, filename):
-        actor_path = os.path.join(directory, f"{filename}_actor.pth")
-        critic_path = os.path.join(directory, f"{filename}_critic.pth")
-        optimizer_path = os.path.join(directory, f"{filename}_optimizer.pth")
+    def normalize_image(self, image):
+        return image / 255.0  # Assuming image pixel values are in [0, 255]
 
-        self.actor.load_state_dict(torch.load(actor_path))
-        self.critic.load_state_dict(torch.load(critic_path))
-        self.optimizer.load_state_dict(torch.load(optimizer_path))
+    def initialize_weights(self, m):
+        if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+            nn.init.kaiming_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+            
+    def eps_decay(self,):
+        self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
+
+            
+    def visualize_policy(self):
+        with torch.no_grad():
+            # Create a sample input with the same dimensions as the training data
+            sample_image = torch.randn(1, *self.image_shape).to(self.device)
+            sample_state = torch.randn(1, *self.state_shape).to(self.device)
+
+            # Forward pass through the actor network
+            combined_features = torch.cat((sample_image, sample_state), dim=1)
+            probs = F.softmax(self.actor(combined_features), dim=1).cpu().numpy().flatten()
+
+            # Plot the policy probabilities
+            actions = range(len(self.composite_actions))
+            plt.bar(actions, probs)
+            plt.xlabel('Actions')
+            plt.ylabel('Probability')
+            plt.title('Policy Visualization')
+            plt.show()
+
+    def store_transition(self, state, action, reward, next_state, done):
+            self.memory.push(state, action, reward, next_state, done)
+            # Debug statement
+            print(f"Transition stored: State: {state}, Action: {action}, Reward: {reward}, Next state: {next_state}, Done: {done}")
+            
+    def monitor_memory(self,):
+            allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+            max_allocated = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            print(f"Current allocated memory: {allocated:.2f} GB")
+            print(f"Max allocated memory: {max_allocated:.2f} GB")
+
+
+
+    def normalize_rewards(self, rewards):
+        mean = rewards.mean()
+        std = rewards.std() + 1e-8  # Adding a small value to avoid division by zero
+        normalized_rewards = (rewards - mean) / std
+        return normalized_rewards
+
+    def soft_update(self, target_net, source_net, tau=0.005):
+        for target_param, param in zip(target_net.parameters(), source_net.parameters()):
+            target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
+
+
+
+    def save(self, filepath):
+        state = {
+            'actor_state_dict': self.actor.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epsilon': self.epsilon
+        }
+        torch.save(state, filepath)
+
+    def load(self, filepath):
+        state = torch.load(filepath)
+        self.actor.load_state_dict(state['actor_state_dict'])
+        self.critic.load_state_dict(state['critic_state_dict'])
+        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+        self.epsilon = state['epsilon']
 
 
 class MAPPO:
-    def __init__(self, env, state_dim, action_dim, agent_params, memory_capacity=10000, use_cuda=True):
+    def __init__(self, env, state_dim, action_dim, agent_params):
         self.env = env
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.memory = ReplayBuffer(memory_capacity)
-        self.use_cuda = use_cuda and torch.cuda.is_available()
-        self.num_agents = agent_params['num_agents']
-        self.max_steps = 1000  # Define the maximum number of steps per episode
+        self.memory = ReplayBuffer(agent_params['memory_capacity'])
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         self.agents = []
-        #self.replay_buf = ReplayBuffer(100000)
+        for _ in range(agent_params['num_agents']):
+            actor = ActorNetwork(state_dim['state'], agent_params['actor_hidden_size'], action_dim, agent_params['actor_output_act']).to(self.device)
+            critic = CriticNetwork(state_dim['state'], action_dim, agent_params['critic_hidden_size']).to(self.device)
+            agent = Agent(actor, critic, self.memory, None, agent_params['reward_gamma'], agent_params['clip_epsilon'], torch.cuda.is_available(), agent_params['num_agents'], max_grad_norm=agent_params['max_grad_norm'])
+            self.agents.append(agent)
 
-        for agent_id in range(self.num_agents):
-            actor = ActorNetwork(state_dim, agent_params['actor_hidden_size'], action_dim)
-            critic = CriticNetwork(state_dim, agent_params['critic_hidden_size'])
-            optimizer = Adam(
-                list(actor.parameters()) + list(critic.parameters()),
-                lr=agent_params['actor_lr']
-            )
-            self.agents.append(Agent(actor, critic, self.memory, optimizer, agent_params['reward_gamma'], agent_params['clip_epsilon'], self.use_cuda, self.num_agents))
+        # Create a list of all the agent parameters for the optimizer
+        actor_parameters = []
+        critic_parameters = []
+        all_parameters = []
+        for agent in self.agents:
+            actor_parameters += list(agent.actor.parameters())
+            critic_parameters += list(agent.critic.parameters())
+            all_parameters += list(agent.actor.parameters())
+            all_parameters += list(agent.critic.parameters())
+        # Define separate optimizers for actor and critic networks
+        self.actor_optimizer = Adam(actor_parameters, lr=agent_params['actor_lr'])
+        self.critic_optimizer = Adam(critic_parameters, lr=agent_params['critic_lr'])
+        self.optimizer = Adam(all_parameters, lr=agent_params['actor_lr'])  # Shared optimizer
+        for agent in self.agents:
+            agent.actor_optimizer = self.actor_optimizer
+            agent.critic_optimizer = self.critic_optimizer
+            agent.optimizer = self.optimizer
+            
 
-    def run(self, num_episodes, batch_size):
+    def run(self, num_episodes, batch_size, update_interval=10):
+        episode_rewards = [None] * num_episodes
+        critic_losses = []
+        update_steps = 0
+        
+        def flatten_done(done):
+            return [item for sublist in done for item in sublist]
+
+        def normalize_and_clip_rewards(rewards, clip_value=10):
+            mean_reward = np.mean(rewards)
+            std_reward = np.std(rewards)
+            normalized_rewards = (rewards - mean_reward) / (std_reward + 1e-5)
+            clipped_rewards = np.clip(normalized_rewards, -clip_value, clip_value)
+            return clipped_rewards.tolist()
+
         for episode in range(num_episodes):
             states = self.env.reset()
-            for step in range(self.max_steps):
-                actions = [agent.select_action(state) for agent, state in zip(self.agents, states)]
-                next_states, rewards, done = self.env.step(actions)
-                self.memory.push(states, actions, rewards, next_states, done)
-                states = next_states
-                if all(done):
-                    break
-            self.train(batch_size)
+            done = [(False, False)] * len(self.agents)  # Initialize done as a list of tuples
 
+            print(f"Episode {episode} starting.")
+
+            episode_rewards_list = []  # To store all rewards for this episode
+
+            while not all(flatten_done(done)):
+                action_indices = [agent.select_action(state) for agent, state in zip(self.agents, states)]
+                actions = [self.agents[0].composite_actions[idx] for idx in action_indices]  # Convert indices to actual actions
+
+                next_states, rewards, done = self.env.step(actions)
+
+                if isinstance(rewards, (float, int)):
+                    rewards = [rewards] * len(self.agents)
+                elif isinstance(rewards, list):
+                    rewards = [(reward, reward) for reward in rewards]
+
+                if isinstance(done, bool):
+                    done = [(done, done)] * len(self.agents)
+                elif isinstance(done, list) and isinstance(done[0], bool):
+                    done = [(d, d) for d in done]
+
+                episode_rewards_list.extend(rewards)
+
+                for i, agent in enumerate(self.agents):
+                    agent.memory.push(states[i], action_indices[i], rewards[i], next_states[i], done[i])
+
+                states = next_states
+
+                update_steps += 1
+                if episode % 5 == 0 and len(self.memory) >= batch_size:
+                    for agent in self.agents:
+                        critic_loss = agent.update(batch_size)
+                        if critic_loss is not None:
+                            critic_losses.append(critic_loss)
+            
+            for agent in self.agents:
+                agent.eps_decay()
+            episode_rewards_list = normalize_and_clip_rewards(episode_rewards_list)
+            print("REWARDS LIST:  ", episode_rewards_list, "\n\n")
+            for i, agent in enumerate(self.agents):
+                episode_rewards[episode] = sum(episode_rewards_list[i])
+            print(f"EPiSODE: {episode}")
+
+        # Plotting rewards and critic loss
+        fig, (ax1, ax2) = plt.subplots(2, 1)
+        ax1.plot(range(num_episodes), episode_rewards)
+        ax1.set_xlabel('Episode')
+        ax1.set_ylabel('Total Reward')
+        ax1.set_title('Total Reward per Episode')
+        ax2.plot(range(len(critic_losses)), critic_losses)
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Critic Loss')
+        ax2.set_title('Critic Loss per Episode')
+        plt.tight_layout()
+        plt.show()
+
+
+    def train(self, batch_size):
+        for agent in self.agents:
+            agent.update(batch_size)
 
     def interact(self):
         states = self.env.reset()
@@ -249,6 +404,8 @@ class MAPPO:
             print(f"Actions selected: {actions}")  # Debugging statement
             try:
                 next_states, rewards, done = self.env.step(actions)
+                # Compute rewards using the reward function
+                rewards = [self.env.compute_reward(agent_id) for agent_id in range(self.num_agents)]
             except Exception as e:
                 print(f"Error in env.step: {e}")
                 print(f"Actions: {actions}")
@@ -261,11 +418,12 @@ class MAPPO:
                 print("step: " + str(step))
                 break
 
-    def train(self, batch_size):
-        for agent in self.agents:
-            agent.update(batch_size)
+    def save(self, directory):
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        for i, agent in enumerate(self.agents):
+            agent.save(os.path.join(directory, f'agent_{i}.pth'))
 
-
-
-
-
+    def load(self, directory):
+        for i, agent in enumerate(self.agents):
+            agent.load(os.path.join(directory, f'agent_{i}.pth'))
