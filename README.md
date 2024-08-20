@@ -12,7 +12,7 @@ We are using the latest version of CARLA 0.9.15 (non-stable version to get the m
 ## **Install and Run**
 1. Pull the code from the `simple` branch (the main branch of this repo, other branches are for testing).
 2. Activate the conda environment with `conda activate <YOUR_ENV_NAME>`.
-3. Run the `mappo_r` file, which will create the environment (cars and sensors) and then run the MARL code using MAPPO.
+3. Run the `mappo_r` file, which will create the environment (cars and sensors) and runs the MARL code in our case MAPPO.
 
 ## **VR Functionalities (Performance Issues)**
 To get CARLA in VR mode on Windows (using the Meta Quest 2, though it may differ for other VR headsets), you need to:
