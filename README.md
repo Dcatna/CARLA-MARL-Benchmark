@@ -25,6 +25,8 @@ For Linux VR is not directly supported. To get the Meta Quest 2 to recognize Lin
 3. Download the `.apk` file for the version of ALVR you downloaded, then use SideQuest to connect your headset (via USB-C) and import the `.apk` file.
 4. You should now see ALVR in your apps on the Meta Quest 2. Start ALVR on both systems, sync them up, and then follow the same steps as the Windows instructions.
 
+**More Information here [VR documentation from Piti98](https://github.com/carla-simulator/carla/files/9333229/Adding.VR.to.CARLA.pdf)**
+
 ## **MAP GENERATION**
 1. Go to https://www.openstreetmap.org/#map=15/40.15630/-75.01130, select and cutout of area that you want to generate in CARLA (CANT BE MORE THAN 1gb data so make relatively small maps), then copy the link from the Overpass API
 2. Navigate to `CarlaToolsContent/OnroadMapGenerator`. Right click on `UW_OnRoadMainWidget` and select Launch Editor Utility Widget
