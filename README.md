@@ -1,4 +1,4 @@
-# **WINLAB MARL Benchmark for Autonomous Driving Testing**
+# **WINLAB MARL Benchmark for Autonomous Driving Testing with MAPPO Implementation**
 
 **HELLO to whomever** 👋 This project was worked on by Dominic Catena and Haejin Song throughout the summer of 2024 during the WINLAB research internship. The purpose of this project is to create a multi-agent reinforcement learning environment in CARLA (Driving simulator) for testing MARL driving algorithms.
 
