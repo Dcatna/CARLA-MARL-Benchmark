@@ -7,6 +7,7 @@ We are using the latest version of CARLA 0.9.15 (non-stable version to get the m
 
 1. Run the `make launch` command at the root of CARLA to start the server.
 2. Navigate to the custom maps folder and double-click the `nb_intersection` map to load it.
+3. You can download the nb_intersection from the tes branch
 
 ## **Install and Run**
 1. Pull the code from the `simple` branch (the main branch of this repo, other branches are for testing).
